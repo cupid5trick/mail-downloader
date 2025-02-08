@@ -24,8 +24,11 @@ imap:
   port: 993
 
 attachments:
-  mimetypes:
-    - application/pdf
+  application/pdf:
+    subjects: # subject contains
+      - invoice, amazon # invoice AND amazon
+      - rechnung # OR rechnung
+      - receipt # OR receipt
 
 mails:
   subjects: # subject contains
