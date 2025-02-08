@@ -141,9 +141,13 @@ func main() {
 
 		// attachments
 		for _, attachment := range mail.Attachments {
+			if _, ok := config.Attachments[attachment.Mimetype]; !ok {
+				continue
+			}
+
 			s := &search.Search{
-				Search: config.Attachments.Mimetypes,
-				Data:   attachment.Mimetype,
+				Search: config.Attachments[attachment.Mimetype].Subjects,
+				Data:   mail.Subject,
 			}
 
 			if !s.Find() {
