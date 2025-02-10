@@ -109,7 +109,7 @@ func (mail *Mail) FetchBody(reader *gomessage.Reader) error {
 	return nil
 }
 
-func (mail *Mail) GeneratePdf(pdfGen handlers.FileHandler[orcgen.PDFConfig]) (*fileinfo.Fileinfo, error) {
+func (mail *Mail) GeneratePdf(pdfGen handlers.FileHandler[orcgen.PDFConfig]) (fileInfo *fileinfo.Fileinfo, err error) {
 	var htmlBody []byte
 	var textBody []byte
 	for _, body := range mail.Body {
@@ -123,6 +123,12 @@ func (mail *Mail) GeneratePdf(pdfGen handlers.FileHandler[orcgen.PDFConfig]) (*f
 			continue
 		}
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
 
 	if len(htmlBody) != 0 {
 		return orcgen.ConvertHTML(pdfGen, htmlBody)
