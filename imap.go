@@ -1,16 +1,19 @@
 package main
 
 import (
-	i "github.com/emersion/go-imap"
-	"github.com/emersion/go-imap/client"
-	"github.com/emersion/go-message/charset"
-	m "github.com/emersion/go-message/mail"
-	"github.com/pkg/errors"
-	"golang.org/x/text/encoding/charmap"
 	"log"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	i "github.com/emersion/go-imap"
+	id "github.com/emersion/go-imap-id"
+	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-message/charset"
+	m "github.com/emersion/go-message/mail"
+	"github.com/gabriel-vasile/mimetype"
+	"github.com/pkg/errors"
+	"golang.org/x/text/encoding/charmap"
 )
 
 type imap struct {
@@ -23,7 +26,16 @@ type imap struct {
 
 func (imap *imap) connect() error {
 	c, err := client.DialTLS(imap.Server+":"+imap.Port, nil)
+	if err != nil {
+		return err
+	}
 
+	// Enable ID extension support
+	idClient := id.NewClient(c)
+	_, err = idClient.ID(map[string]string{
+		id.FieldName:    "mail-downloader",
+		id.FieldVersion: "1.0.0",
+	})
 	if err != nil {
 		return err
 	}
@@ -76,9 +88,15 @@ func (imap *imap) fixUtf(str string) string {
 func (imap *imap) fetchMessages(seqset *i.SeqSet, mailsChan chan *mail) error {
 	messages := make(chan *i.Message)
 	section := new(i.BodySectionName)
+	items := []i.FetchItem{
+		section.FetchItem(),
+		i.FetchEnvelope,
+		i.FetchBody,
+		i.FetchBodyStructure,
+	}
 
 	go func() {
-		if err := imap.Client.UidFetch(seqset, []i.FetchItem{section.FetchItem(), i.FetchEnvelope}, messages); err != nil {
+		if err := imap.Client.UidFetch(seqset, items, messages); err != nil {
 			log.Println(err)
 		}
 	}()
@@ -86,6 +104,11 @@ func (imap *imap) fetchMessages(seqset *i.SeqSet, mailsChan chan *mail) error {
 	for message := range messages {
 		mail := new(mail)
 		mail.fetchMeta(message)
+
+		// Get MIME type from the message structure
+		if message.BodyStructure != nil {
+			mail.MimeType = message.BodyStructure.MIMEType + "/" + message.BodyStructure.MIMESubType
+		}
 
 		reader := message.GetBody(section)
 
@@ -108,7 +131,32 @@ func (imap *imap) fetchMessages(seqset *i.SeqSet, mailsChan chan *mail) error {
 			continue
 		}
 
+		// Initialize MultipartMimeType and AttachmentMimeType slices before fetching body
+		mail.MultipartMimeType = make([]string, 0)
+		mail.AttachmentMimeType = make([]string, 0)
+
 		mail.Error = mail.fetchBody(mailReader)
+
+		// Detect MIME types for each body part
+		for _, body := range mail.Body {
+			if len(body) > 0 {
+				mtype := mimetype.Detect(body)
+				if mtype != nil {
+					mail.MultipartMimeType = append(mail.MultipartMimeType, mtype.String())
+				}
+			}
+		}
+
+		// Detect MIME types for each attachment
+		for _, attachment := range mail.Attachments {
+			if len(attachment.Body) > 0 {
+				mtype := mimetype.Detect(attachment.Body)
+				if mtype != nil {
+					mail.AttachmentMimeType = append(mail.AttachmentMimeType, mtype.String())
+				}
+			}
+		}
+
 		mailsChan <- mail
 
 		if mailReader != nil {

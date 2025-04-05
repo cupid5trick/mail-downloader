@@ -1,11 +1,12 @@
 module github.com/loeffel-io/mail-downloader
 
-go 1.23
+go 1.23.8
 
 require (
 	github.com/SebastiaanKlippert/go-wkhtmltopdf v1.9.3
 	github.com/cheggaaa/pb/v3 v3.1.5
 	github.com/emersion/go-imap v1.2.1
+	github.com/emersion/go-imap-id v0.0.0-20190926060100-f94a56b9ecde
 	github.com/emersion/go-message v0.18.1
 	github.com/gabriel-vasile/mimetype v1.4.5
 	github.com/pkg/errors v0.9.1

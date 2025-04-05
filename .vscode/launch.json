@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch file",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${file}",
+            "args": ["-config", "config.yaml", "-from", "2018-01-01", "-to", "2025-04-06"],
+        }
+    ]
+}

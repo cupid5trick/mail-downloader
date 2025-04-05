@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SebastiaanKlippert/go-wkhtmltopdf"
@@ -15,20 +19,130 @@ import (
 )
 
 type mail struct {
-	Uid         uint32
-	MessageID   string
-	Subject     string
-	From        []*i.Address
-	Date        time.Time
-	Body        [][]byte
-	Attachments []*attachment
-	Error       error
+	Uid                uint32
+	MessageID          string
+	Subject            string
+	From               []*i.Address
+	Date               time.Time
+	Body               [][]byte
+	Attachments        []*attachment
+	MimeType           string
+	MultipartMimeType  []string
+	AttachmentMimeType []string
+	Error              error
 }
 
 type attachment struct {
 	Filename string
 	Body     []byte
 	Mimetype string
+}
+
+// jsonMail is used for JSON serialization
+type jsonMail struct {
+	Uid                uint32    `json:"uid"`
+	MessageID          string    `json:"message_id"`
+	Subject            string    `json:"subject"`
+	From               []string  `json:"from"`
+	Date               time.Time `json:"date"`
+	Attachments        []string  `json:"attachments"`
+	MimeType           string    `json:"mime_type"`
+	MultipartMimeType  []string  `json:"multipart_mime_type"`
+	AttachmentMimeType []string  `json:"attachment_mime_type"`
+}
+
+// mailList represents the metadata for a user's email collection
+type mailList struct {
+	Email  string     `json:"email"`
+	List   []jsonMail `json:"list"`
+	Vendor string     `json:"vendor"`
+	Server string     `json:"server"`
+	mu     sync.Mutex `json:"-"`
+	path   string     `json:"-"`
+}
+
+// newMailList creates a new mailList or loads existing one
+func newMailList(email, vendor, server, mailDir string) (*mailList, error) {
+	ml := &mailList{
+		Email:  email,
+		List:   make([]jsonMail, 0),
+		Vendor: vendor,
+		Server: server,
+		path:   filepath.Join(mailDir, "data.json"),
+	}
+
+	// Ensure directory exists
+	if err := os.MkdirAll(filepath.Dir(ml.path), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Try to load existing data
+	data, err := os.ReadFile(ml.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// File doesn't exist yet, that's fine
+			return ml, nil
+		}
+		return nil, fmt.Errorf("failed to read metadata: %w", err)
+	}
+
+	if err := json.Unmarshal(data, ml); err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+
+	return ml, nil
+}
+
+// addMail adds a new mail to the list and saves the metadata
+func (ml *mailList) addMail(mail *mail) error {
+	ml.mu.Lock()
+	defer ml.mu.Unlock()
+
+	// Convert mail to jsonMail
+	jsonData, err := mail.toJson()
+	if err != nil {
+		return fmt.Errorf("failed to convert mail to json: %w", err)
+	}
+
+	var jm jsonMail
+	if err := json.Unmarshal(jsonData, &jm); err != nil {
+		return fmt.Errorf("failed to parse mail json: %w", err)
+	}
+
+	// Check if mail already exists
+	for i, existing := range ml.List {
+		if existing.Uid == jm.Uid {
+			// Update existing entry
+			ml.List[i] = jm
+			return ml.save()
+		}
+	}
+
+	// Add new entry
+	ml.List = append(ml.List, jm)
+	return ml.save()
+}
+
+// save writes the metadata to disk atomically
+func (ml *mailList) save() error {
+	data, err := json.MarshalIndent(ml, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Write to temporary file first
+	tmpPath := ml.path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temporary file: %w", err)
+	}
+
+	// Rename temporary file to actual file (atomic operation)
+	if err := os.Rename(tmpPath, ml.path); err != nil {
+		os.Remove(tmpPath) // Clean up temp file if rename fails
+		return fmt.Errorf("failed to save metadata: %w", err)
+	}
+
+	return nil
 }
 
 func (mail *mail) fetchMeta(message *i.Message) {
@@ -45,6 +159,12 @@ func (mail *mail) fetchBody(reader *m.Reader) error {
 		attachments []*attachment
 		count       = counter.CreateCounter()
 	)
+
+	// Get the mail's content type
+	contentType, _, err := reader.Header.ContentType()
+	if err == nil {
+		mail.MimeType = contentType
+	}
 
 	for {
 		part, err := reader.NextPart()
@@ -141,13 +261,54 @@ func (mail *mail) generatePdf() ([]byte, error) {
 	return pdfg.Bytes(), nil
 }
 
-func (mail *mail) getDirectoryName(username string) string {
+func (mail *mail) getDirectoryName(root, username string) string {
 	return fmt.Sprintf(
-		"files/%s/%s-%d/%s",
-		username, mail.Date.Month(), mail.Date.Year(), mail.From[0].HostName,
+		"%s/%s/%s/%s",
+		root, username, mail.Date.Format("200601"), mail.From[0].HostName,
 	)
 }
 
 func (mail *mail) getErrorText() string {
 	return fmt.Sprintf("Error: %s\nSubject: %s\nFrom: %s\n", mail.Error.Error(), mail.Subject, mail.Date)
+}
+
+func (mail *mail) toJson() ([]byte, error) {
+	// Convert mail.From to string slice
+	fromAddrs := make([]string, len(mail.From))
+	for i, addr := range mail.From {
+		if addr.PersonalName != "" {
+			fromAddrs[i] = fmt.Sprintf("%s <%s@%s>", addr.PersonalName, addr.MailboxName, addr.HostName)
+		} else {
+			fromAddrs[i] = fmt.Sprintf("%s@%s", addr.MailboxName, addr.HostName)
+		}
+	}
+
+	// Convert attachments to filename slice
+	attachmentNames := make([]string, len(mail.Attachments))
+	for i, att := range mail.Attachments {
+		attachmentNames[i] = att.Filename
+	}
+
+	// Create JSON structure
+	jsonData := jsonMail{
+		Uid:                mail.Uid,
+		MessageID:          mail.MessageID,
+		Subject:            mail.Subject,
+		From:               fromAddrs,
+		Date:               mail.Date,
+		Attachments:        attachmentNames,
+		MimeType:           mail.MimeType,
+		MultipartMimeType:  mail.MultipartMimeType,
+		AttachmentMimeType: mail.AttachmentMimeType,
+	}
+
+	// Use json.Marshal with SetEscapeHTML(false) to preserve unicode and compact output
+	buf := &bytes.Buffer{}
+	encoder := json.NewEncoder(buf)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "")
+	if err := encoder.Encode(jsonData); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
